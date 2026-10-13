@@ -1,0 +1,19 @@
+{
+  "name": "mini-agent-harness",
+  "module": "index.ts",
+  "type": "module",
+  "scripts": {
+    "start": "bun run tui.ts",
+    "agent": "bun run index.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^7"
+  },
+  "dependencies": {
+    "@opentui/core": "^0.6.3",
+    "just-bash": "^3.6.0"
+  }
+}
