@@ -4,6 +4,8 @@ import {
 } from "@opentui/core";
 import { format } from "node:util";
 import { createSession, main } from "./index.ts";
+import { ToolCallView } from "./ui/tool-call-view.ts";
+import { ContextPanel } from "./ui/context-panel.ts";
 
 const session = await createSession();
 
@@ -41,9 +43,11 @@ layout.add(prompt);
 const footer = new BoxRenderable(renderer, {
   width: "100%", flexDirection: "row", justifyContent: "space-between", flexShrink: 0,
 });
-footer.add(new TextRenderable(renderer, {
-  content: "index.ts", fg: "#777777",
-}));
+const contextButton = new TextRenderable(renderer, {
+  content: "Context · Ctrl+K", fg: "#6aa6e8", selectable: false,
+  onMouseUp: event => { if (event.button === 0) { event.stopPropagation(); openContext(); } },
+});
+footer.add(contextButton);
 footer.add(new TextRenderable(renderer, {
   content: "Enter send  ·  Ctrl+C quit", fg: "#999999",
 }));
@@ -61,18 +65,82 @@ renderer.on("destroy", () => { console.log = originalLog; });
 let busy = false;
 let assistantText: TextRenderable | undefined;
 let replyText = "";
-const unsubscribe = session.subscribe(event => {
-  if (event.type === "text_delta" && assistantText) {
-    replyText += event.text;
-    assistantText.content = replyText;
+const toolRows = new Map<string, ToolCallView>();
+let contextPanel: ContextPanel | undefined;
+
+function updateContextButton(): void {
+  const messages = session.sessionManager.getMessages();
+  const omitted = messages.filter((message, index) => message.role === "user" && !session.context.includesUser(index)).length;
+  const excerpts = messages.filter((message, index) => message.role === "tool" && session.context.toolExcerpt(index) !== undefined).length;
+  contextButton.content = `Context · ${omitted} omitted · ${excerpts} excerpts · Ctrl+K`;
+}
+
+function openContext(): void {
+  if (busy || contextPanel) return;
+  input.blur();
+  contextPanel = new ContextPanel(renderer, session, updateContextButton, () => {
+    contextPanel = undefined; updateContextButton(); input.focus();
+  }, input.value);
+  renderer.root.add(contextPanel);
+}
+
+renderer.keyInput.on("keypress", key => {
+  if (key.ctrl && key.name === "k") {
+    key.preventDefault();
+    if (contextPanel) contextPanel.close(); else openContext();
+  } else if (key.name === "escape" && contextPanel) {
+    key.preventDefault(); contextPanel.close();
   }
-  if (event.type === "message_end" && event.message.role === "assistant" && assistantText) {
-    assistantText.content = event.message.content;
+});
+
+function ensureAssistantText(): TextRenderable {
+  if (!assistantText) {
+    replyText = "";
+    assistantText = new TextRenderable(renderer, {
+      content: "", fg: "#aaaaaa", paddingX: 2,
+    });
+    transcript.add(assistantText);
+  }
+  return assistantText;
+}
+
+const unsubscribe = session.subscribe(event => {
+  if (event.type === "text_delta") {
+    const view = ensureAssistantText();
+    replyText += event.text;
+    view.content = replyText;
+  }
+  if (event.type === "toolcall_start") {
+    if (assistantText && !replyText) assistantText.content = "";
+    const view = new ToolCallView(renderer, event.toolName, event.argumentsText);
+    toolRows.set(event.toolCallId, view);
+    transcript.add(view);
+  }
+  if (event.type === "toolcall_delta") {
+    toolRows.get(event.toolCallId)?.setDetails(event.argumentsText);
+  }
+  if (event.type === "toolcall_end") {
+    const row = toolRows.get(event.toolCall.id);
+    if (row) {
+      row.setDetails(typeof event.toolCall.arguments.command === "string"
+        ? event.toolCall.arguments.command : JSON.stringify(event.toolCall.arguments, null, 2));
+      row.setStatus("ready");
+    }
+  }
+  if (event.type === "tool_execution_start") {
+    toolRows.get(event.toolCallId)?.setStatus("running");
+  }
+  if (event.type === "tool_execution_end") {
+    toolRows.get(event.toolCallId)?.finish(event.content, event.isError);
+  }
+  if (event.type === "message_end" && event.message.role === "assistant") {
+    if (event.message.content) ensureAssistantText().content = event.message.content;
+    if (event.message.toolCalls?.length) assistantText = undefined;
   }
 });
 renderer.on("destroy", unsubscribe);
 input.on(InputRenderableEvents.ENTER, async (value: string) => {
-  if (busy || !value.trim()) return;
+  if (busy || contextPanel || !value.trim()) return;
   busy = true;
   const message = new BoxRenderable(renderer, {
     width: "100%", padding: 1, backgroundColor: "#141414",
@@ -82,6 +150,7 @@ input.on(InputRenderableEvents.ENTER, async (value: string) => {
   transcript.add(message);
   input.value = "";
   replyText = "";
+  toolRows.clear();
   assistantText = new TextRenderable(renderer, {
     content: "Thinking…", fg: "#aaaaaa", paddingX: 2,
   });
@@ -89,7 +158,7 @@ input.on(InputRenderableEvents.ENTER, async (value: string) => {
   try {
     await main(value, session);
   } catch (error) {
-    assistantText.content = `Error: ${error instanceof Error ? error.message : String(error)}`;
+    ensureAssistantText().content = `Error: ${error instanceof Error ? error.message : String(error)}`;
   } finally {
     busy = false;
   }

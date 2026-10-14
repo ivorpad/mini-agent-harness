@@ -1,7 +1,8 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { Credential } from "@earendil-works/pi-ai/dist/auth/types.js";
+import { AuthStorage } from "@earendil-works/pi-coding-agent/dist/core/auth-storage.js";
+import { OpenAIOAuth, type Credential, type CredentialStore } from "./openai-oauth.ts";
 import type { Message } from "../agent/messages.ts";
 import type { ThinkingLevel } from "../agent/types.ts";
 import { createProviders, type ModelProvider, type RequestOptions } from "./providers.ts";
@@ -43,12 +44,13 @@ export function createModels(): Record<string, ModelDefinition> {
 }
 
 export class ModelRuntime implements ModelRuntimeInterface {
-  private readonly auth: AuthData;
+  private readonly oauth: OpenAIOAuth;
   private readonly models: Record<string, ModelDefinition>;
   private readonly providers: Map<string, ModelProvider>;
 
-  constructor(auth: AuthData, providers = createProviders(), models = createModels()) {
-    this.auth = auth;
+  constructor(auth: AuthData, providers = createProviders(), models = createModels(),
+    credentials: CredentialStore = AuthStorage.inMemory(auth)) {
+    this.oauth = new OpenAIOAuth(credentials);
     this.models = models;
     this.providers = new Map(providers.map(provider => [provider.id, provider]));
   }
@@ -57,8 +59,7 @@ export class ModelRuntime implements ModelRuntimeInterface {
     providers?: ModelProvider[];
     models?: Record<string, ModelDefinition>;
   } = {}): Promise<ModelRuntime> {
-    const auth: AuthData = await Bun.file(authPath).json();
-    return new ModelRuntime(auth, options.providers, options.models);
+    return new ModelRuntime({}, options.providers, options.models, AuthStorage.create(authPath));
   }
 
   getModel(provider: string, modelName: string): ModelDefinition {
@@ -72,8 +73,7 @@ export class ModelRuntime implements ModelRuntimeInterface {
   async complete(model: ModelDefinition, messages: Message[], options: RequestOptions = {}) {
     const provider = this.providers.get(model.provider);
     if (!provider) throw new Error(`Provider not implemented: ${model.provider}`);
-    const credential = this.auth[model.provider];
-    if (!credential) throw new Error(`No saved Pi credentials for ${model.provider}`);
+    const credential = await this.oauth.resolve(model.provider, options.signal);
     return provider.complete(model, messages, credential, options);
   }
 }

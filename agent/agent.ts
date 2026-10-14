@@ -1,6 +1,6 @@
 import type { ModelDefinition, ModelRuntime } from "../models/model-runtime.ts";
 import type { Message } from "./messages.ts";
-import type { AssistantMessage } from "../models/providers.ts";
+import type { AssistantMessage, ToolCallStreamEvent } from "../models/providers.ts";
 import type { QueueMode, ThinkingBudgets, ThinkingLevel } from "./types.ts";
 import type { Tool } from "../tools/tool.ts";
 
@@ -32,12 +32,17 @@ export class Agent {
     this.options = options;
   }
 
-  async request(onTextDelta?: (text: string) => void): Promise<AssistantMessage> {
-    return this.options.modelRuntime.complete(this.state.model, this.state.messages, {
+  async request(
+    onTextDelta?: (text: string) => void,
+    onToolCallEvent?: (event: ToolCallStreamEvent) => void,
+    messages = this.state.messages,
+  ): Promise<AssistantMessage> {
+    return this.options.modelRuntime.complete(this.state.model, messages, {
       systemPrompt: this.state.systemPrompt,
       thinkingLevel: this.state.thinkingLevel,
       sessionId: this.options.sessionId,
       onTextDelta,
+      onToolCallEvent,
       tools: this.options.tools?.map(({ name, description, parameters }) => ({ name, description, parameters })),
     });
   }

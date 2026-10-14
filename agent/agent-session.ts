@@ -2,9 +2,12 @@ import type { ModelDefinition, ModelRuntime } from "../models/model-runtime.ts";
 import { Agent } from "./agent.ts";
 import { SessionManager } from "./session-manager.ts";
 import type { Message } from "./messages.ts";
-import type { AssistantMessage } from "../models/providers.ts";
+import type { AssistantMessage, ToolCallStreamEvent } from "../models/providers.ts";
 import type { QueueMode, ThinkingBudgets, ThinkingLevel } from "./types.ts";
 import { BashTool, type BashToolOptions } from "../tools/bash-tool.ts";
+import { buildSystemPrompt } from "./system-prompt.ts";
+import { RequestContext } from "./request-context.ts";
+import { extractToolOutputExcerpts, type ToolExcerpt } from "./tool-output-excerpts.ts";
 
 export interface CreateAgentSessionOptions {
   cwd: string;
@@ -23,6 +26,7 @@ export interface CreateAgentSessionOptions {
 }
 
 export type SessionEvent =
+  | ToolCallStreamEvent
   | { type: "agent_start" }
   | { type: "message_end"; message: Message }
   | { type: "text_delta"; text: string }
@@ -33,6 +37,7 @@ export type SessionEvent =
 export class AgentSession {
   readonly agent: Agent;
   readonly sessionManager: SessionManager;
+  readonly context = new RequestContext();
   private readonly listeners = new Set<(event: SessionEvent) => void>();
   private running = false;
 
@@ -44,6 +49,20 @@ export class AgentSession {
   subscribe(listener: (event: SessionEvent) => void): () => void {
     this.listeners.add(listener);
     return () => { this.listeners.delete(listener); };
+  }
+
+  async extractToolResults(
+    indices: number[],
+    options: { signal?: AbortSignal; task?: string; onProgress?: (completed: number, total: number) => void } = {},
+  ): Promise<ToolExcerpt[]> {
+    if (this.running) throw new Error("Wait for the current request to finish");
+    this.running = true;
+    try {
+      return await extractToolOutputExcerpts(this.agent.options.modelRuntime, this.agent.state.model,
+        this.sessionManager.getMessages(), indices, options);
+    } finally {
+      this.running = false;
+    }
   }
 
   private emit(event: SessionEvent): void {
@@ -63,7 +82,11 @@ export class AgentSession {
       this.emit({ type: "agent_start" });
       await this.append({ role: "user", content });
       while (true) {
-        const reply = await this.agent.request(text => this.emit({ type: "text_delta", text }));
+        const reply = await this.agent.request(
+          text => this.emit({ type: "text_delta", text }),
+          event => this.emit(event),
+          this.context.project(this.agent.state.messages),
+        );
         await this.append(reply);
         if (!reply.toolCalls?.length) return reply;
         for (const call of reply.toolCalls) {
@@ -92,6 +115,8 @@ export class AgentSession {
 export async function createAgentSession(
   options: CreateAgentSessionOptions,
 ): Promise<{ session: AgentSession }> {
+  const bashOptions = { ...options.bash, root: options.bash?.root ?? options.cwd };
+  const systemPrompt = options.systemPrompt ?? await buildSystemPrompt(bashOptions);
   const sessionManager = options.sessionManager
     ?? (options.sessionFile
       ? await SessionManager.open(options.cwd, options.sessionFile)
@@ -99,7 +124,7 @@ export async function createAgentSession(
 
   const agent = new Agent({
     initialState: {
-      systemPrompt: options.systemPrompt ?? "",
+      systemPrompt,
       messages: sessionManager.getMessages(),
       model: options.model,
       thinkingLevel: options.thinkingLevel ?? "off",
@@ -111,7 +136,7 @@ export async function createAgentSession(
     followUpMode: options.followUpMode ?? "one-at-a-time",
     thinkingBudgets: options.thinkingBudgets,
     maxRetryDelayMs: options.maxRetryDelayMs,
-    tools: [new BashTool({ ...options.bash, root: options.bash?.root ?? options.cwd })],
+    tools: [new BashTool(bashOptions)],
   });
 
   const session = new AgentSession(agent, sessionManager);

@@ -1,5 +1,5 @@
 import { isMessage, type Message, type ToolCall } from "../../agent/messages.ts";
-import type { AssistantMessage, ModelProvider } from "../providers.ts";
+import type { AssistantMessage, ModelProvider, ToolCallStreamEvent } from "../providers.ts";
 
 interface ResponseOutput {
   type: string;
@@ -12,6 +12,7 @@ interface ResponseOutput {
 interface ResponseEvent {
   type: string;
   delta?: string;
+  arguments?: string;
   output_index?: number;
   item?: ResponseOutput;
   response?: { status: string; output: ResponseOutput[] };
@@ -83,20 +84,67 @@ async function* parseSSE(body: ReadableStream<Uint8Array>): AsyncGenerator<Respo
 async function readResponseStream(
   body: ReadableStream<Uint8Array>,
   onTextDelta?: (text: string) => void,
+  onToolCallEvent?: (event: ToolCallStreamEvent) => void,
 ): Promise<AssistantMessage> {
   const completedItems = new Map<number, ResponseOutput>();
+  const toolCalls = new Map<number, { id: string; name: string; argumentsText: string; ended: boolean }>();
+
+  function startToolCall(index: number, item: ResponseOutput) {
+    if (item.type !== "function_call") return;
+    if (!item.call_id || !item.name) throw new Error("Incomplete streamed tool request");
+    let call = toolCalls.get(index);
+    if (!call) {
+      call = { id: item.call_id, name: item.name, argumentsText: item.arguments ?? "", ended: false };
+      toolCalls.set(index, call);
+      onToolCallEvent?.({ type: "toolcall_start", toolCallId: call.id, toolName: call.name, argumentsText: call.argumentsText });
+    }
+    return call;
+  }
+
+  function updateArguments(index: number, argumentsText: string) {
+    const call = toolCalls.get(index);
+    if (!call || call.ended) return;
+    const delta = argumentsText.startsWith(call.argumentsText)
+      ? argumentsText.slice(call.argumentsText.length)
+      : argumentsText;
+    call.argumentsText = argumentsText;
+    if (delta) onToolCallEvent?.({ type: "toolcall_delta", toolCallId: call.id, toolName: call.name, delta, argumentsText });
+  }
+
+  function finishToolCall(index: number, item: ResponseOutput) {
+    const call = startToolCall(index, item);
+    if (!call || call.ended) return;
+    updateArguments(index, item.arguments ?? call.argumentsText);
+    const toolCall = completedMessage([{ ...item, arguments: call.argumentsText }]).toolCalls![0]!;
+    call.ended = true;
+    onToolCallEvent?.({ type: "toolcall_end", toolCall });
+  }
+
   for await (const event of parseSSE(body)) {
     if (event.type === "response.output_text.delta" && typeof event.delta === "string") {
       onTextDelta?.(event.delta);
     }
+    if (event.type === "response.output_item.added" && event.item && typeof event.output_index === "number") {
+      startToolCall(event.output_index, event.item);
+    }
+    if (event.type === "response.function_call_arguments.delta" && typeof event.output_index === "number" && typeof event.delta === "string") {
+      const call = toolCalls.get(event.output_index);
+      if (call) updateArguments(event.output_index, call.argumentsText + event.delta);
+    }
+    if (event.type === "response.function_call_arguments.done" && typeof event.output_index === "number" && typeof event.arguments === "string") {
+      updateArguments(event.output_index, event.arguments);
+    }
     if (event.type === "response.output_item.done" && event.item && typeof event.output_index === "number") {
       completedItems.set(event.output_index, event.item);
+      finishToolCall(event.output_index, event.item);
     }
     if (event.type === "response.completed" || event.type === "response.done") {
       if (event.response?.status !== "completed") throw new Error("Model response did not complete");
-      const output = completedItems.size
-        ? [...completedItems].sort(([left], [right]) => left - right).map(([, item]) => item)
-        : event.response.output;
+      // Some providers only include completed calls in the terminal response.
+      const terminalOutput = event.response.output ?? [];
+      terminalOutput.forEach((item, index) => finishToolCall(index, item));
+      const output = terminalOutput.length ? terminalOutput
+        : [...completedItems].sort(([left], [right]) => left - right).map(([, item]) => item);
       return completedMessage(output);
     }
     if (["error", "response.failed", "response.incomplete"].includes(event.type)) {
@@ -159,7 +207,7 @@ export function createOpenAIProvider(id: "openai" | "openai-codex"): ModelProvid
         throw new Error(`${id} Responses request failed (HTTP ${response.status}): ${detail}`);
       }
       if (!response.body) throw new Error("Model response has no stream");
-      return readResponseStream(response.body, options.onTextDelta);
+      return readResponseStream(response.body, options.onTextDelta, options.onToolCallEvent);
     },
   };
 }

@@ -8,7 +8,6 @@ export async function createSession(cwd = process.cwd()): Promise<AgentSession> 
     cwd,
     modelRuntime,
     model,
-    systemPrompt: "You are a helpful assistant.",
   });
   return session;
 }

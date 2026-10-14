@@ -13,7 +13,6 @@
     "typescript": "^7"
   },
   "dependencies": {
-    "@opentui/core": "^0.6.3",
-    "just-bash": "^3.6.0"
+    "@opentui/core": "^0.6.3"
   }
 }
