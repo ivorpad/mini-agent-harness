@@ -32,3 +32,30 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Finder (MacOS) folder config
 .DS_Store
+
+# Local agent state, handoffs, and generated artifacts
+.sessions/
+.harness/
+.harness.json
+.harness.local.json
+.handoffs/
+handoffs/
+handoff/
+HANDOFF*.md
+handoff*.md
+.artifacts/
+artifacts/
+.tracelight*
+
+# Credentials and machine-local configuration
+.env.*
+!.env.example
+!.env.*.example
+.auth/
+.secrets/
+credentials.json
+auth.json
+*.pem
+*.key
+*.p12
+*.pfx
