@@ -1,6 +1,6 @@
 # mini-agent-harness
 
-I'm building this mostly to learn how coding agents work. I want to understand the code around the model by writing my own harness, starting with the smallest loop: send messages, run the tools the model asks for, feed back the results, repeat.
+I'm building this to develop a strong mental model of how coding agents like Claude Code and Codex work. I want to understand the code around the model by writing my own harness, starting with the smallest loop: send messages, run the tools the model asks for, feed back the results, repeat.
 
 From there, I'm adding things as I want to understand them: sessions, context management, steering, permissions. Pi is a reference to learn from. I use Tracelight to pause execution, inspect real values and try small experiments. I want to be able to follow a request through the code and explain what happened.
 
